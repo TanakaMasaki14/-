@@ -1,5 +1,12 @@
 #include <Windows.h>
+#include <d3d12.h>
+#include <dxgi1_6.h>
+#include <cassert>
+#include <vector>
+#include <string>
 
+#pragma comment(lib, "d3d12.lib")
+#pragma comment(lib, "dxgi.lib")
 LRESULT WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 	//メッセージに応じてゲーム固有の処理うぃ行う
 	switch (msg) {
@@ -51,7 +58,123 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 	MSG msg{};
 
 	//DirectX初期処理　ここから
+	
+	//デバッグレイヤーをオンに
 
+	HRESULT result;
+	ID3D12Device* device = nullptr;
+	IDXGIFactory7* dxgiFactory = nullptr;
+	IDXGISwapChain4* swapChain = nullptr;
+	ID3D12CommandAllocator* cmdAllocator = nullptr;
+	ID3D12GraphicsCommandList* commandlist = nullptr;
+	ID3D12CommandQueue* commandQueue = nullptr;
+	ID3D12DescriptorHeap* rtvHeap = nullptr;
+
+
+	//コンソールへの文字出力
+	OutputDebugStringA("Hello,DirectX!!\n");
+
+	//DXGIファクトリーの生成
+	result = CreateDXGIFactory(IID_PPV_ARGS(&dxgiFactory));
+	assert(SUCCEEDED(result));
+
+	//アダプターの列拳用
+	std::vector<IDXGIAdapter4*> adapters;
+	//ここに特定の名前をもつアダプターオブジェクトが入る
+	IDXGIAdapter4* tmpAdapter = nullptr;
+
+	//パフォーマンスが高いものから淳に、すべてのアダプターを列拳する
+	for (UINT i = 0;
+		dxgiFactory->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&tmpAdapter)) != DXGI_ERROR_NOT_FOUND; i++) {
+		//動的配列に追加する
+		adapters.push_back(tmpAdapter);
+
+		for (size_t i = 0; i < adapters.size(); i++) {
+			DXGI_ADAPTER_DESC3 adapterDesc;
+			//アダプターの情報を取得する
+			adapters[i]->GetDesc3(&adapterDesc);
+
+			//ソフトウェアデバイスを回避
+			if (!(adapterDesc.Flags & DXGI_ADAPTER_FLAG3_SOFTWARE)) {
+				//デバイスを採用してループを抜ける
+				tmpAdapter = adapters[i];
+				break;
+			}
+		}
+	}
+	//対応レベルの配列
+	D3D_FEATURE_LEVEL levels[] = {
+		D3D_FEATURE_LEVEL_12_1,
+		D3D_FEATURE_LEVEL_12_0,
+		D3D_FEATURE_LEVEL_11_1,
+		D3D_FEATURE_LEVEL_12_0,
+	};
+
+	D3D_FEATURE_LEVEL featureLevel;
+	for (size_t i = 0; i < _countof(levels); i++) {
+		//採用したアダプターでデバイスを生成
+		result = D3D12CreateDevice(tmpAdapter, levels[i], IID_PPV_ARGS(&device));
+		if (result == S_OK) {
+			//デバイスを生成できた辞典でループを抜ける
+			featureLevel = levels[i];
+			break;
+		}
+	}
+
+	//コマンドアロケーターを生成
+	result = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&cmdAllocator));
+	assert(SUCCEEDED(result));
+
+	//コマンドリストを生成
+	result = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, cmdAllocator, nullptr, IID_PPV_ARGS(&commandlist));
+	assert(SUCCEEDED(result));
+
+	//コマンドキューの設定
+	D3D12_COMMAND_QUEUE_DESC commandQueueDesc{};
+	//コマンドキューを生成
+	result = device->CreateCommandQueue(&commandQueueDesc, IID_PPV_ARGS(&commandQueue));
+	assert(SUCCEEDED(result));
+
+	//スワップチェーンの設定
+	DXGI_SWAP_CHAIN_DESC1 swapChainDesc{};
+	swapChainDesc.Width = 120;
+	swapChainDesc.Height = 720;
+	swapChainDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	swapChainDesc.SampleDesc.Count = 1;
+	swapChainDesc.BufferUsage = DXGI_USAGE_BACK_BUFFER;
+	swapChainDesc.BufferCount = 2;
+	swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+	swapChainDesc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+	//スワップチェーンの生成
+	result = dxgiFactory->CreateSwapChainForHwnd(commandQueue, hwnd, &swapChainDesc, nullptr, nullptr, (IDXGISwapChain1**)&swapChain);
+	assert(SUCCEEDED(result));
+
+	//デスクリプタヒープの設定
+	D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc{};
+	rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+	rtvHeapDesc.NumDescriptors = swapChainDesc.BufferCount;
+
+	//デスクリプタヒープの生成
+	device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&rtvHeap));
+
+	std::vector<ID3D12Resource*> backBuffers;
+	backBuffers.resize(swapChainDesc.BufferCount);
+
+	for (size_t i = 0; i < backBuffers.size(); i++) {
+		swapChain->GetBuffer((UINT)i, IID_PPV_ARGS(&backBuffers[i]));
+		D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = rtvHeap->GetCPUDescriptorHandleForHeapStart();
+		rtvHandle.ptr += i * device->GetDescriptorHandleIncrementSize(rtvHeapDesc.Type);
+		D3D12_RENDER_TARGET_VIEW_DESC rtvDesc{};
+		rtvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+		rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+		device->CreateRenderTargetView(backBuffers[i], &rtvDesc, rtvHandle);
+
+		//フェンスの生成
+		ID3D12Fence* fence = nullptr;
+		UINT64 fenceVal = 0;
+
+		result = device->CreateFence(fenceVal, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
+	}
 	//DirectY初期処理　ここから
 
 	//ゲームループ
@@ -71,9 +194,6 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 	}
 	
 	UnregisterClass(w.lpszClassName, w.hInstance);
-
-	//コンソールへの文字出力
-	OutputDebugStringA("Hello,DirectX!!\n");
 
 	return 0;
 }
